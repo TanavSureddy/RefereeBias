@@ -5,91 +5,97 @@ from sklearn.preprocessing import StandardScaler
 def create_ref_team_dataframe(
     input_csv='data/processed.csv', 
     output_csv='data/dbscan_ready.csv',
-    top6 = ['Arsenal', 'Chelsea', 'Liverpool', 'Manchester City', 'Manchester United', 'Tottenham']
+    top6 = ["Arsenal", "Chelsea", "Liverpool", "Man City", "Man United", "Tottenham"]
 ):
     """
-    1. Reads the processed CSV.
-    2. For each row (match), collects stats for the 'HomeTeam' and 'AwayTeam' if they're in the top-6.
-    3. Aggregates stats by (Referee, Team).
-    4. Ensures each referee has exactly 6 rows, one for each top-6 team (filling with 0 if no matches).
-    5. Scales numeric features.
-    6. Saves to CSV.
+    1. Reads processed.csv from 'data/'.
+    2. Filters matches to only those involving a top-6 team.
+    3. Expands each match into (Referee, Team, Fouls, YellowCards, RedCards)
+       rows for home and away if they're in top-6.
+    4. Aggregates stats by (Referee, Team).
+    5. Reindexes so each Referee has exactly 6 rows (one per top-6 team),
+       filling missing stats with 0.
+    6. Drops referees who never officiated any top-6 match (all stats = 0).
+    7. Scales numeric features.
+    8. Saves final CSV to 'data/dbscan_ready.csv'.
     """
 
-    # Load your processed data from the data folder
+    print(f"Reading: {input_csv}")
     df = pd.read_csv(input_csv)
+    print(f"Initial shape of df: {df.shape}")
 
-    # -------------------------------------------
-    # Step 1: Collect match-level data only if team is in top-6
-    # -------------------------------------------
-    # We will create an "expanded" DataFrame where each row corresponds to:
-    #   (Referee, Team, [Fouls], [YellowCards], [RedCards], etc.)
-    # for home AND away sides, if that side is in top-6.
+    # 1) Filter: Keep only matches where HomeTeam or AwayTeam is in top-6
+    df_top6 = df[(df['HomeTeam'].isin(top6)) | (df['AwayTeam'].isin(top6))]
+    print(f"After filtering for top-6 teams, shape: {df_top6.shape}")
 
+    if df_top6.empty:
+        print("ERROR: No matches found for the given top-6 team names.")
+        return
+
+    # 2) Expand rows: For each match, create a row for the team that is in top-6.
     rows = []
-    for _, row in df.iterrows():
+    for _, row in df_top6.iterrows():
         referee = row['Referee']
-        
-        # Check if home team is in top-6
+        # For the home side
         if row['HomeTeam'] in top6:
             rows.append({
                 'Referee': referee,
                 'Team': row['HomeTeam'],
-                'Fouls': row.get('HomeFouls', 0),
-                'YellowCards': row.get('HomeYellowCards', 0),
-                'RedCards': row.get('HomeRedCards', 0)
+                'Fouls': row.get('HomeTeamFouls', 0),
+                'YellowCards': row.get('HomeTeamYellowCards', 0),
+                'RedCards': row.get('HomeTeamRedCards', 0)
             })
-
-        # Check if away team is in top-6
+        # For the away side
         if row['AwayTeam'] in top6:
             rows.append({
                 'Referee': referee,
                 'Team': row['AwayTeam'],
-                'Fouls': row.get('AwayFouls', 0),
-                'YellowCards': row.get('AwayYellowCards', 0),
-                'RedCards': row.get('AwayRedCards', 0)
+                'Fouls': row.get('AwayTeamFouls', 0),
+                'YellowCards': row.get('AwayTeamYellowCards', 0),
+                'RedCards': row.get('AwayTeamRedCards', 0)
             })
 
     df_expanded = pd.DataFrame(rows)
+    print(f"After expanding into (Referee, Team) rows, shape: {df_expanded.shape}")
+    
+    if df_expanded.empty:
+        print("ERROR: After expansion, there are no rows. Check your column names for fouls/cards.")
+        return
 
-    # -------------------------------------------
-    # Step 2: Aggregate stats by (Referee, Team)
-    # -------------------------------------------
-    # Summing over multiple matches. 
-    # If your dataset uses different column names for fouls/cards, adjust accordingly.
-    df_grouped = df_expanded.groupby(['Referee','Team'], as_index=False).agg({
+    # 3) Aggregate by (Referee, Team)
+    df_grouped = df_expanded.groupby(['Referee', 'Team'], as_index=False).agg({
         'Fouls': 'sum',
         'YellowCards': 'sum',
         'RedCards': 'sum'
     })
+    print(f"After grouping, shape: {df_grouped.shape}")
 
-    # -------------------------------------------
-    # Step 3: Ensure each referee has 6 rows, one for each top-6 team
-    # -------------------------------------------
-    # Create a complete set of (Referee, Team) pairs for the referees in df_grouped
+    # 4) Reindex so each Referee has 6 rows (one per top-6 team)
     all_refs = df_grouped['Referee'].unique()
-    all_teams = top6
+    all_combos = pd.MultiIndex.from_product([all_refs, top6], names=['Referee', 'Team'])
+    df_grouped = df_grouped.set_index(['Referee', 'Team']).reindex(all_combos, fill_value=0).reset_index()
+    print(f"After reindexing, shape: {df_grouped.shape}")
 
-    # Create a MultiIndex for every (Referee, Team) combination
-    all_combos = pd.MultiIndex.from_product([all_refs, all_teams], names=['Referee','Team'])
-    
-    # Reindex df_grouped so it has a row for every (Referee, Team) combination, filling missing values with 0
-    df_grouped = df_grouped.set_index(['Referee','Team']).reindex(all_combos, fill_value=0).reset_index()
+    # 5) Drop referees who never officiated any top-6 match (all stats = 0)
+    sums_per_ref = df_grouped.groupby('Referee')[['Fouls', 'YellowCards', 'RedCards']].sum().reset_index()
+    sums_per_ref['SumAll'] = sums_per_ref['Fouls'] + sums_per_ref['YellowCards'] + sums_per_ref['RedCards']
+    valid_refs = sums_per_ref[sums_per_ref['SumAll'] > 0]['Referee']
+    df_grouped = df_grouped[df_grouped['Referee'].isin(valid_refs)].copy()
+    print(f"After dropping referees with 0 stats, shape: {df_grouped.shape}")
 
-    # -------------------------------------------
-    # Step 4: Scale the numeric features
-    # -------------------------------------------
+    if df_grouped.empty:
+        print("ERROR: After dropping 0-stat referees, no data remains.")
+        return
+
+    # 6) Scale numeric features (Fouls, YellowCards, RedCards)
     features = ['Fouls', 'YellowCards', 'RedCards']
     scaler = StandardScaler()
-    df_grouped_scaled = df_grouped.copy()
-    df_grouped_scaled[features] = scaler.fit_transform(df_grouped[features])
+    df_grouped[features] = scaler.fit_transform(df_grouped[features])
 
-    # -------------------------------------------
-    # Step 5: Save to CSV for DBSCAN
-    # -------------------------------------------
-    df_grouped_scaled.to_csv(output_csv, index=False)
+    # 7) Save final CSV
+    df_grouped.to_csv(output_csv, index=False)
     print(f"Data frame organized for DBSCAN (Ref-Team rows) and saved as '{output_csv}'.")
+    print(f"Final shape: {df_grouped.shape[0]} rows × {df_grouped.shape[1]} columns")
 
-# Run the preprocessing if this script is executed directly
 if __name__ == "__main__":
     create_ref_team_dataframe()
