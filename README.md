@@ -1,7 +1,7 @@
 # About RefBias - an EPL Referee-Bias Determinator
 Hi
 
-![banner](https://github.com/SamirVarm01/RefBias/blob/main/1.png)
+![banner](https://github.com/SamirVarma01/RefBias/blob/main/1.png)
 ![banner](https://github.com/SamirVarm01/RefBias/blob/main/2.png)
 ![banner](https://github.com/SamirVarm01/RefBias/blob/main/3.png)
 
